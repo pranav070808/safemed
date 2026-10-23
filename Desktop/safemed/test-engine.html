@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SafeMed Engine Tester</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
+  h1 { color: #38bdf8; margin-bottom: 8px; font-size: 1.5rem; }
+  .subtitle { color: #94a3b8; margin-bottom: 20px; font-size: 0.9rem; }
+  .step { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .step-title { color: #38bdf8; font-weight: 600; margin-bottom: 8px; }
+  input[type="text"] { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 14px; }
+  button { padding: 12px 24px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; font-size: 14px; }
+  .btn-primary { background: #38bdf8; color: #0f172a; }
+  .btn-primary:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+  #status { margin-top: 12px; padding: 12px; border-radius: 8px; display: none; }
+  .status-loading { background: #1e3a5f; color: #7dd3fc; display: block !important; }
+  .status-success { background: #14532d; color: #86efac; display: block !important; }
+  .status-error { background: #450a0a; color: #fca5a5; display: block !important; }
+  #results { margin-top: 20px; display: none; }
+  .conflict-card { background: #451a03; border-left: 4px solid #f97316; padding: 12px; border-radius: 0 8px 8px 0; margin-bottom: 10px; }
+  .conflict-high { border-left-color: #ef4444; background: #450a0a; }
+  .conflict-medium { border-left-color: #f97316; background: #451a03; }
+  .conflict-low { border-left-color: #eab308; background: #422006; }
+  .severity { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-bottom: 4px; }
+  .sev-high { background: #ef4444; color: white; }
+  .sev-medium { background: #f97316; color: white; }
+  .sev-low { background: #eab308; color: #1a1a1a; }
+  .med-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.85rem; }
+  .med-table th { text-align: left; padding: 8px; background: #334155; color: #94a3b8; }
+  .med-table td { padding: 8px; border-bottom: 1px solid #1e293b; }
+  .badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; }
+  .badge-verified { background: #14532d; color: #86efac; }
+  .badge-unverified { background: #78350f; color: #fde68a; }
+  .badge-conflicting { background: #7f1d1d; color: #fca5a5; }
+  .json-box { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-top: 12px; max-height: 400px; overflow: auto; font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; }
+  .section-title { color: #38bdf8; font-size: 1.1rem; font-weight: 600; margin: 16px 0 8px; }
+  .patient-card { background: #1e293b; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .test-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #334155; }
+  .test-high { color: #fca5a5; }
+  .test-normal { color: #86efac; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: #38bdf8; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>🏥 SafeMed Engine Tester</h1>
+<p class="subtitle">Test the AI engine with sample prescriptions before connecting to the app</p>
+
+<div class="step">
+  <div class="step-title">Step 1: Paste your Gemini API Key</div>
+  <input type="text" id="apiKey" placeholder="AIzaSy... (from aistudio.google.com/apikey)">
+</div>
+
+<div class="step">
+  <div class="step-title">Step 2: Run the test</div>
+  <p style="color:#94a3b8; font-size:0.85rem; margin-bottom:10px;">
+    This sends 4 test documents (2 prescriptions + 2 lab reports) with deliberate conflicts.
+    The engine should catch: duplicate paracetamol, aspirin+ibuprofen interaction, missing allergy, worsening labs.
+  </p>
+  <button class="btn-primary" id="runBtn" onclick="runTest()">🚀 Run Test</button>
+  <div id="status"></div>
+</div>
+
+<div id="results">
+  <div id="patientSection"></div>
+  <div id="conflictSection"></div>
+  <div id="medicineSection"></div>
+  <div id="testSection"></div>
+  <details>
+    <summary>📋 Full JSON Response (for Person 2)</summary>
+    <div class="json-box" id="jsonOutput"></div>
+  </details>
+</div>
+
+<script>
+// ---- Embed the test documents ----
+const TEST_DOCS = [
+  {
+    name: "prescription_dr_sharma.txt",
+    content: `Dr. R.K. Sharma, MD (Cardiology)
+Apollo Hospital, Chennai
+Date: 10-Oct-2026
+
+Patient: Ramesh Kumar, Male, Age 62
+Blood Group: B+
+
+Diagnosis: Hypertension, Type 2 Diabetes
+
+Rx:
+1. Telma 40 (Telmisartan 40mg) — 1 tablet morning — for blood pressure
+2. Ecosprin 75 (Aspirin 75mg) — 1 tablet after lunch — blood thinner
+3. Dolo 650 (Paracetamol 650mg) — 1 tablet SOS for fever/pain
+4. Glycomet GP 2 (Metformin + Glimepiride) — 1 tablet before breakfast
+
+Known Allergies: Sulfonamides
+
+Follow up after 1 month.`
+  },
+  {
+    name: "prescription_dr_meena.txt",
+    content: `Dr. S. Meena, MBBS, MD (General Medicine)
+Meena Clinic, T. Nagar, Chennai
+Date: 18-Oct-2026
+
+Patient: Ramesh Kumar, 62/M
+
+Complaints: Body pain, mild fever since 2 days
+
+Rx:
+1. Calpol 650 (Paracetamol 650mg) — 1 tablet thrice daily for 3 days
+2. Brufen 400 (Ibuprofen 400mg) — 1 tablet twice daily after food for pain
+3. Pan-D (Pantoprazole + Domperidone) — 1 capsule before breakfast
+
+Allergies: Not asked
+
+Review after 5 days if symptoms persist.`
+  },
+  {
+    name: "lab_report_oct15.txt",
+    content: `City Diagnostics Lab, Chennai
+Date: 15-Oct-2026
+
+Patient: Ramesh Kumar, 62 yrs, Male
+Ref. by: Dr. R.K. Sharma
+
+BLOOD TEST REPORT
+
+Test                    Result      Normal Range      Status
+-----------------------------------------------------------
+Fasting Blood Sugar     186 mg/dL   70-110 mg/dL      HIGH
+HbA1c                  8.2%        4.0-5.6%          HIGH
+Serum Creatinine       1.4 mg/dL   0.7-1.3 mg/dL     HIGH
+Total Cholesterol      242 mg/dL   <200 mg/dL         HIGH
+Blood Pressure         150/95                         HIGH
+Hemoglobin             13.2 g/dL   13.0-17.0 g/dL     Normal
+Platelet Count         2.1 lakh    1.5-4.0 lakh       Normal`
+  },
+  {
+    name: "old_lab_report_jul.txt",
+    content: `City Diagnostics Lab, Chennai
+Date: 12-Jul-2026
+
+Patient: Ramesh Kumar, 62 yrs, Male
+Ref. by: Dr. R.K. Sharma
+
+BLOOD TEST REPORT
+
+Test                    Result      Normal Range      Status
+-----------------------------------------------------------
+Fasting Blood Sugar     142 mg/dL   70-110 mg/dL      HIGH
+HbA1c                  7.1%        4.0-5.6%          HIGH
+Serum Creatinine       1.1 mg/dL   0.7-1.3 mg/dL     Normal
+Total Cholesterol      210 mg/dL   <200 mg/dL         HIGH
+Hemoglobin             13.8 g/dL   13.0-17.0 g/dL     Normal`
+  }
+];
+
+// ---- Gemini extraction (same logic as engine.js) ----
+const GEMINI_MODEL = "gemini-2.0-flash";
+</script>
+
+<!-- Load engine.js for enrichConflicts -->
+<script src="engine.js"></script>
+
+<script>
+const PROMPT = `You are SafeMed's Evidence Trust Engine — a careful medical records analyst for India.
+
+You receive medical documents (prescriptions, lab reports, discharge summaries) numbered as Document 1, Document 2, etc.
+
+Read ALL of them carefully and return ONE JSON object.
+
+CRITICAL RULES:
+1. Every fact you extract MUST have "source_doc" (which document number) and "source_excerpt" (the exact words from that document).
+2. If something is unclear or missing, mark status as "unverified" — NEVER guess.
+3. Map every Indian brand name to its generic salt (Dolo 650 → Paracetamol, Crocin → Paracetamol, Ecosprin → Aspirin).
+4. After extracting, CROSS-CHECK for conflicts across documents.
+
+Return this JSON structure:
+{
+  "patient": { "name":"", "age":"", "gender":"", "blood_group":"", "confidence":"verified|unverified" },
+  "medicines": [{ "brand":"", "generic":"", "dose":"", "frequency":"", "prescribed_by":"", "date":"", "status":"active|discontinued|unknown", "confidence":"verified|unverified|conflicting", "source_doc":1, "source_excerpt":"" }],
+  "allergies": [{ "allergy":"", "confidence":"verified|unverified", "source_doc":1, "source_excerpt":"" }],
+  "conditions": [{ "condition":"", "confidence":"verified|unverified", "source_doc":1, "source_excerpt":"" }],
+  "tests": [{ "name":"", "value":"", "unit":"", "normal_range":"", "date":"", "status":"normal|high|low|unknown", "confidence":"verified|unverified", "source_doc":1, "source_excerpt":"" }],
+  "timeline": [{ "date":"", "event":"", "source_doc":1 }],
+  "conflicts": [{ "type":"duplicate_medicine|contradictory_status|drug_interaction|allergy_conflict|worsening_trend", "severity":"high|medium|low", "title":"", "detail":"", "docs_involved":[1,2], "evidence":[{"doc":1,"excerpt":""}], "recommendation":"" }]
+}
+
+CONFLICT DETECTION — check ALL:
+1. DUPLICATE MEDICINE: Same generic under different brands from different doctors (e.g. Dolo 650 + Calpol 650 = both Paracetamol).
+2. DRUG INTERACTION: Dangerous combos (blood thinners + NSAIDs).
+3. ALLERGY CONFLICT: Medicine conflicts with documented allergy.
+4. WORSENING TREND: Lab values getting worse over time across documents.
+
+Quote EXACT excerpts from documents. Return ONLY valid JSON.`;
+
+async function runTest() {
+  const apiKey = document.getElementById("apiKey").value.trim();
+  if (!apiKey) { alert("Paste your API key first!"); return; }
+
+  const btn = document.getElementById("runBtn");
+  const status = document.getElementById("status");
+  btn.disabled = true;
+  btn.textContent = "⏳ Running...";
+  status.className = "status-loading";
+  status.style.display = "block";
+  status.textContent = "🔄 Sending 4 documents to Gemini... (takes 5-15 seconds)";
+
+  try {
+    // Build message
+    let msg = "Analyze these medical documents:\n\n";
+    TEST_DOCS.forEach((doc, i) => {
+      msg += `--- Document ${i+1}: ${doc.name} ---\n${doc.content}\n\n`;
+    });
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: PROMPT + "\n\n" + msg }] }],
+          generationConfig: { temperature: 0.1, responseMimeType: "application/json" }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error?.message || response.statusText);
+    }
+
+    const data = await response.json();
+    const raw = data.candidates[0].content.parts[0].text;
+    const result = JSON.parse(raw.replace(/```json|```/g, "").trim());
+
+    // Run local safety net
+    if (window.SafeMedEngine) {
+      window.SafeMedEngine.enrichConflicts(result);
+    }
+
+    // Show success
+    status.className = "status-success";
+    status.textContent = `✅ Done! Found ${result.medicines?.length || 0} medicines, ${result.conflicts?.length || 0} conflicts, ${result.tests?.length || 0} test results.`;
+
+    renderResults(result);
+
+  } catch (err) {
+    status.className = "status-error";
+    status.textContent = `❌ Error: ${err.message}`;
+    console.error(err);
+  }
+
+  btn.disabled = false;
+  btn.textContent = "🚀 Run Test Again";
+}
+
+function renderResults(result) {
+  const resultsDiv = document.getElementById("results");
+  resultsDiv.style.display = "block";
+
+  // Patient
+  const p = result.patient || {};
+  document.getElementById("patientSection").innerHTML = `
+    <div class="section-title">👤 Patient</div>
+    <div class="patient-card">
+      <strong>${p.name || "Unknown"}</strong> · ${p.age || "?"} · ${p.gender || "?"} · Blood: ${p.blood_group || "?"}
+      <span class="badge badge-${p.confidence || 'unverified'}">${p.confidence || 'unverified'}</span>
+    </div>
+  `;
+
+  // Conflicts
+  const conflicts = result.conflicts || [];
+  let conflictHTML = `<div class="section-title">⚠️ Conflicts (${conflicts.length})</div>`;
+  if (conflicts.length === 0) {
+    conflictHTML += `<p style="color:#fca5a5;">⚠️ No conflicts detected — this might be a problem! The test docs have deliberate conflicts.</p>`;
+  }
+  conflicts.forEach(c => {
+    conflictHTML += `
+      <div class="conflict-card conflict-${c.severity}">
+        <span class="severity sev-${c.severity}">${c.severity}</span>
+        <strong>${c.title}</strong>
+        <p style="margin-top:4px;font-size:0.85rem;">${c.detail}</p>
+        <p style="margin-top:4px;font-size:0.8rem;color:#94a3b8;">💡 ${c.recommendation || ""}</p>
+      </div>
+    `;
+  });
+  document.getElementById("conflictSection").innerHTML = conflictHTML;
+
+  // Medicines
+  const meds = result.medicines || [];
+  let medHTML = `<div class="section-title">💊 Medicines (${meds.length})</div>
+    <table class="med-table"><tr><th>Brand</th><th>Generic</th><th>Dose</th><th>Doctor</th><th>Status</th></tr>`;
+  meds.forEach(m => {
+    medHTML += `<tr>
+      <td>${m.brand}</td><td>${m.generic}</td><td>${m.dose}</td>
+      <td>${m.prescribed_by || "?"}</td>
+      <td><span class="badge badge-${m.confidence}">${m.confidence}</span></td>
+    </tr>`;
+  });
+  medHTML += `</table>`;
+  document.getElementById("medicineSection").innerHTML = medHTML;
+
+  // Tests
+  const tests = result.tests || [];
+  let testHTML = `<div class="section-title">🧪 Lab Results (${tests.length})</div>`;
+  tests.forEach(t => {
+    testHTML += `<div class="test-row">
+      <span>${t.name} (${t.date || "?"})</span>
+      <span class="${t.status === 'high' || t.status === 'low' ? 'test-high' : 'test-normal'}">${t.value} ${t.unit || ""} ${t.status === 'high' ? '⬆️' : t.status === 'low' ? '⬇️' : '✅'}</span>
+    </div>`;
+  });
+  document.getElementById("testSection").innerHTML = testHTML;
+
+  // JSON
+  document.getElementById("jsonOutput").textContent = JSON.stringify(result, null, 2);
+}
+</script>
+
+</body>
+</html>
