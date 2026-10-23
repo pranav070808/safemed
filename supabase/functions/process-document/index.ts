@@ -1,6 +1,89 @@
 import { withSupabase } from "npm:@supabase/server";
-
 import { extractFromDocuments } from "../_shared/engine.js";
+
+type CandidateFact = {
+  fact_type: string;
+  normalized_key: string;
+  value: Record<string, unknown>;
+  event_date: string | null;
+  page_number: number | null;
+  evidence_excerpt: string;
+  verification_status: "unverified";
+  uncertainty: unknown[];
+};
+
+function normalizeText(value: string): string {
+  return value.toLocaleLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function normalizedKey(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return value.trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 120) || null;
+}
+
+function safeDate(value: unknown): string | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value ? value : null;
+}
+
+function makeFact(
+  factType: string,
+  keyValue: unknown,
+  value: Record<string, unknown>,
+  dateValue: unknown,
+  excerptValue: unknown,
+  sourceText: string,
+): CandidateFact | null {
+  const key = normalizedKey(keyValue);
+  if (!key || typeof excerptValue !== "string" || !excerptValue.trim()) return null;
+  const excerpt = excerptValue.trim().slice(0, 1200);
+  if (!normalizeText(sourceText).includes(normalizeText(excerpt))) return null;
+
+  return {
+    fact_type: factType,
+    normalized_key: key,
+    value,
+    event_date: safeDate(dateValue),
+    page_number: 1,
+    evidence_excerpt: excerpt,
+    verification_status: "unverified",
+    uncertainty: [],
+  };
+}
+
+function mapFacts(extraction: Record<string, unknown>, sourceText: string): CandidateFact[] {
+  const facts: CandidateFact[] = [];
+  const addList = (field: string, mapper: (item: Record<string, unknown>) => CandidateFact | null) => {
+    const items = extraction[field];
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const fact = mapper(item as Record<string, unknown>);
+        if (fact) facts.push(fact);
+      }
+    }
+  };
+
+  addList("medicines", (item) => makeFact(
+    "medication", item.generic || item.brand, item,
+    item.date, item.source_excerpt, sourceText,
+  ));
+  addList("allergies", (item) => makeFact(
+    "allergy", item.allergy, item,
+    null, item.source_excerpt, sourceText,
+  ));
+  addList("conditions", (item) => makeFact(
+    "condition", item.condition, item,
+    null, item.source_excerpt, sourceText,
+  ));
+  addList("tests", (item) => makeFact(
+    "test_result", item.name, item,
+    item.date, item.source_excerpt, sourceText,
+  ));
+
+  return facts;
+}
 
 export default {
   fetch: withSupabase({ auth: ["user"] }, async (req, ctx) => {
@@ -9,7 +92,6 @@ export default {
     }
 
     let body: { documentId?: string };
-
     try {
       body = await req.json();
     } catch {
@@ -17,7 +99,6 @@ export default {
     }
 
     const documentId = body.documentId?.trim();
-
     if (!documentId) {
       return Response.json({ error: "documentId is required" }, { status: 400 });
     }
@@ -31,47 +112,69 @@ export default {
     if (documentError || !document) {
       return Response.json({ error: "Document not found" }, { status: 404 });
     }
+    if (document.mime_type !== "text/plain") {
+      return Response.json({ error: "This version supports plain text files only" }, { status: 415 });
+    }
 
     const { data: file, error: downloadError } = await ctx.supabase.storage
       .from("medical-records")
       .download(document.storage_path);
-
     if (downloadError || !file) {
       return Response.json({ error: "Could not access document file" }, { status: 404 });
     }
 
-    const apiKey = Deno.env.get("GEMINI_API_KEY");
+    const sourceText = await file.text();
+    if (!sourceText.trim()) {
+      return Response.json({ error: "The document is empty" }, { status: 422 });
+    }
 
+    const apiKey = Deno.env.get("GEMINI_API_KEY");
     if (!apiKey) {
       return Response.json({ error: "Document processing is not configured" }, { status: 503 });
     }
 
-    // The shared extraction engine accepts text content (or base64 image data),
-    // not a Storage Blob. For this first MVP path, process text files only.
-    if (document.mime_type !== "text/plain") {
-      return Response.json(
-        { error: "This first processing version supports text files only" },
-        { status: 415 },
-      );
-    }
-
-    const content = await file.text();
-    if (!content.trim()) {
-      return Response.json({ error: "The document is empty" }, { status: 422 });
-    }
-
-    const extraction = await extractFromDocuments(apiKey, [
-      {
+    try {
+      const extraction = await extractFromDocuments(apiKey, [{
         name: document.storage_path.split("/").pop() ?? "record.txt",
-        content,
-      },
-    ]);
+        content: sourceText,
+      }]);
+      const facts = mapFacts(extraction as Record<string, unknown>, sourceText);
 
-    return Response.json({
-      documentId: document.id,
-      patientId: document.patient_id,
-      status: "review_required",
-      extraction,
-    });
+      if (facts.length > 0) {
+        const { error: insertError } = await ctx.supabaseAdmin
+          .from("medical_facts")
+          .insert(facts.map((fact) => ({
+            patient_id: document.patient_id,
+            document_id: document.id,
+            ...fact,
+          })));
+        if (insertError) throw insertError;
+      }
+
+      const { error: statusError } = await ctx.supabaseAdmin
+        .from("documents")
+        .update({ processing_status: "needs_review" })
+        .eq("id", document.id);
+      if (statusError) throw statusError;
+
+      return Response.json({
+        documentId: document.id,
+        patientId: document.patient_id,
+        processingStatus: "needs_review",
+        savedFactCount: facts.length,
+        skippedUnsupportedFactCount:
+          ["medicines", "allergies", "conditions", "tests"].reduce((total, field) => {
+            const list = extraction[field];
+            return total + (Array.isArray(list) ? list.length : 0);
+          }, 0) - facts.length,
+        extraction,
+      });
+    } catch {
+      await ctx.supabaseAdmin
+        .from("documents")
+        .update({ processing_status: "failed" })
+        .eq("id", document.id);
+      return Response.json({ error: "Document processing failed" }, { status: 502 });
+    }
   }),
 };
