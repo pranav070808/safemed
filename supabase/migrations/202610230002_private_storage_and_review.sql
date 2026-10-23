@@ -179,3 +179,45 @@ $$;
 revoke all on function public.submit_review(uuid, uuid, text, text, jsonb) from public;
 revoke all on function public.submit_review(uuid, uuid, text, text, jsonb) from anon;
 grant execute on function public.submit_review(uuid, uuid, text, text, jsonb) to authenticated;
+
+
+-- Tighten browser writes. The trusted processing function (service role, server-side
+-- only) writes extracted facts and conflicts; clients can read only their own data.
+drop policy if exists patients_owner_access on public.patients;
+create policy patients_owner_read on public.patients
+  for select to authenticated using (owner_id = (select auth.uid()));
+create policy patients_owner_insert on public.patients
+  for insert to authenticated with check (owner_id = (select auth.uid()));
+create policy patients_owner_update on public.patients
+  for update to authenticated
+  using (owner_id = (select auth.uid()))
+  with check (owner_id = (select auth.uid()));
+-- No patient DELETE policy: cascading deletion must not erase audit history.
+
+drop policy if exists documents_owner_access on public.documents;
+create policy documents_owner_read on public.documents
+  for select to authenticated using (public.owns_patient(patient_id));
+create policy documents_owner_insert on public.documents
+  for insert to authenticated
+  with check (
+    public.owns_patient(patient_id)
+    and uploaded_by = (select auth.uid())
+  );
+-- Processing status and file metadata are changed by trusted server-side code.
+
+drop policy if exists facts_owner_access on public.medical_facts;
+create policy facts_owner_read on public.medical_facts
+  for select to authenticated using (public.owns_patient(patient_id));
+-- Only the trusted processing function can create or alter extracted facts.
+
+drop policy if exists conflicts_owner_access on public.conflicts;
+create policy conflicts_owner_read on public.conflicts
+  for select to authenticated using (public.owns_patient(patient_id));
+
+drop policy if exists conflict_facts_owner_access on public.conflict_facts;
+create policy conflict_facts_owner_read on public.conflict_facts
+  for select to authenticated using (public.owns_patient(patient_id));
+
+drop policy if exists reviews_owner_insert on public.reviews;
+-- Reviews are inserted only through submit_review so the fact/conflict update
+-- and audit event are committed in the same database transaction.
