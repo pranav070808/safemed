@@ -149,3 +149,28 @@ The backend stores conflicts in `conflicts` and links facts using `conflict_fact
 - Keep document storage private and use synthetic data only.
 - Treat model output as untrusted input. Validate shape, lengths, dates, enums, source references, and evidence before persistence.
 - This contract supports a hackathon prototype, not clinical verification or production healthcare claims.
+
+
+## Storage contract (MVP)
+
+- Bucket: `medical-records`, private.
+- Supported upload: `text/plain`, maximum 5 MiB for this migration.
+- Object path: `patients/<patient-uuid>/documents/<document-uuid>.txt`.
+- Storage policies allow an authenticated patient owner to read/upload only within their own patient path. No client update/delete policy is provided.
+- Upload the object before inserting its `documents` metadata row. The backend must verify both the authenticated owner and the stored object before processing.
+
+## Calling the atomic review operation
+
+Use the authenticated Supabase client to invoke the Postgres RPC; never send a reviewer ID from the browser:
+
+```ts
+const { data, error } = await supabase.rpc("submit_review", {
+  p_fact_id: factId ?? null,
+  p_conflict_id: conflictId ?? null,
+  p_action: action,
+  p_decision_note: decisionNote ?? null,
+  p_correction: correction ?? null
+});
+```
+
+The RPC accepts exactly one of `p_fact_id` or `p_conflict_id`, derives the reviewer from `auth.uid()`, checks patient ownership, inserts the review, updates the target status, and appends an audit event in one database transaction. It returns review and target identifiers with the database-generated timestamp. Direct browser inserts into reviews or audit events are not allowed by the migration.
