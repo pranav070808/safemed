@@ -85,6 +85,39 @@ function mapFacts(extraction: Record<string, unknown>, sourceText: string): Cand
   return facts;
 }
 
+function mapConflicts(extraction: Record<string, unknown>, patientId: string) {
+  if (!Array.isArray(extraction.conflicts)) return [];
+  const allowedTypes = new Set([
+    "same_time_disagreement", "chronology_candidate", "duplicate_candidate", "ambiguous",
+  ]);
+  const typeMap: Record<string, string> = {
+    duplicate_medicine: "duplicate_candidate",
+    contradictory_status: "same_time_disagreement",
+    allergy_conflict: "same_time_disagreement",
+    worsening_trend: "chronology_candidate",
+    drug_interaction: "ambiguous",
+  };
+
+  return extraction.conflicts.flatMap((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const conflict = item as Record<string, unknown>;
+    const title = typeof conflict.title === "string" ? conflict.title : `Potential conflict ${index + 1}`;
+    const key = normalizedKey(title) ?? `potential_conflict_${index + 1}`;
+    const rawType = typeof conflict.type === "string" ? conflict.type : "ambiguous";
+    const candidateType = typeMap[rawType] ?? rawType;
+    const conflictType = allowedTypes.has(candidateType) ? candidateType : "ambiguous";
+    const detail = typeof conflict.detail === "string" ? conflict.detail : "Potential discrepancy needs review.";
+    const recommendation = typeof conflict.recommendation === "string" ? conflict.recommendation : "";
+    return [{
+      patient_id: patientId,
+      normalized_key: key,
+      conflict_type: conflictType,
+      status: "needs_review",
+      explanation: [title, detail, recommendation].filter(Boolean).join(" — ").slice(0, 4000),
+    }];
+  });
+}
+
 export default {
   fetch: withSupabase({ auth: ["user"] }, async (req, ctx) => {
     if (req.method !== "POST") {
@@ -139,6 +172,7 @@ export default {
         content: sourceText,
       }]);
       const facts = mapFacts(extraction as Record<string, unknown>, sourceText);
+      const conflicts = mapConflicts(extraction as Record<string, unknown>, document.patient_id);
 
       if (facts.length > 0) {
         const { error: insertError } = await ctx.supabaseAdmin
@@ -149,6 +183,13 @@ export default {
             ...fact,
           })));
         if (insertError) throw insertError;
+      }
+
+      if (conflicts.length > 0) {
+        const { error: conflictError } = await ctx.supabaseAdmin
+          .from("conflicts")
+          .insert(conflicts);
+        if (conflictError) throw conflictError;
       }
 
       const { error: statusError } = await ctx.supabaseAdmin
@@ -162,6 +203,7 @@ export default {
         patientId: document.patient_id,
         processingStatus: "needs_review",
         savedFactCount: facts.length,
+        savedConflictCount: conflicts.length,
         skippedUnsupportedFactCount:
           ["medicines", "allergies", "conditions", "tests"].reduce((total, field) => {
             const list = extraction[field];
