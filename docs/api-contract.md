@@ -1,30 +1,151 @@
-# Extraction and review API contract (draft)
+# SafeMed API Contract (Draft v1)
 
-## Candidate fact
+This contract connects Person 3's Evidence Trust Engine to Person 2's Supabase backend. It is a draft for teammate review; update it when the implementation is agreed.
+
+## Ownership
+
+- **Person 3 (engine):** Extract candidate facts, validate source excerpts, normalize values, classify uncertainty, and detect potential conflicts. The engine does not write to Supabase.
+- **Person 2 (backend):** Authenticate and authorize requests, assign IDs, provide source text, call the engine server-side, persist results, and write review/audit events.
+- **Person 1 (frontend):** Use the backend operations and display their returned data. The browser never calls xAI directly.
+
+## Processing input
+
+The backend provides the engine with one document at a time. The backend assigns `patientId` and `documentId`; the model must never invent either.
 
 ```json
 {
-  "patient_ref": "SM001",
-  "fact_type": "medication_status",
-  "normalized_key": "study_med_a",
-  "value": { "display": "StudyMed A", "status": "active" },
-  "event_date": "2026-10-18",
-  "document_id": "<server-assigned-document-uuid>",
-  "page_number": null,
-  "evidence_excerpt": "StudyMed A — active, recorded 18 October 2026.",
-  "verification_status": "unverified",
-  "uncertainty": []
+  "patientId": "server-assigned-patient-uuid",
+  "patientRef": "SM001",
+  "documentId": "server-assigned-document-uuid",
+  "sourceName": "Hospital B",
+  "documentDate": "2026-10-18",
+  "pages": [
+    {
+      "pageNumber": 1,
+      "text": "Medication Review: StudyMed A was discontinued on 2026-10-18."
+    }
+  ]
 }
 ```
 
-## Rules
+For TXT input, use one page with `pageNumber: 1`. Preserve document boundaries and page numbers. Reject empty text. TXT is the guaranteed MVP format; claim PDF support only after it works end to end.
 
-- `document_id` is assigned by the server; the model cannot choose or fabricate it.
-- `evidence_excerpt` must be an exact substring of the uploaded document text. Reject or flag a fact if the excerpt cannot be found.
-- `event_date` is null when absent or ambiguous. Do not substitute upload date for clinical event date.
-- `verification_status` begins as `unverified` for extracted facts.
-- `uncertainty` can include `missing`, `ambiguous`, `unsupported`, or `conflicting` with a short explanation.
-- The conflict engine returns all candidate statements and provenance; it never selects the clinically correct one.
-- A review action contains reviewer ID, action, note, timestamp, and the fact/conflict IDs. Corrections create a new reviewed assertion while preserving original evidence.
+## Engine result
 
-This is a proposal for frontend/backend alignment and must be versioned with implementation.
+The engine returns candidate facts and potential conflicts. The backend validates this result before saving it.
+
+```json
+{
+  "facts": [
+    {
+      "factType": "medication_status",
+      "normalizedKey": "study_med_a",
+      "value": {
+        "display": "StudyMed A",
+        "status": "discontinued"
+      },
+      "eventDate": "2026-10-18",
+      "pageNumber": 1,
+      "evidenceExcerpt": "StudyMed A was discontinued on 2026-10-18.",
+      "extractionStatus": "supported",
+      "uncertainty": []
+    }
+  ],
+  "conflicts": []
+}
+```
+
+### Field rules
+
+- `factType`: stable category such as `medication_status`, `medication_dosage`, `allergy`, `diagnosis`, or `lab_result`.
+- `normalizedKey`: comparison key within a category, e.g. `study_med_a`; do not merge uncertainly similar drug names.
+- `value`: JSON object suitable for the fact. For medication status use `{ "display": "StudyMed A", "status": "active" | "discontinued" | "unknown" }`. Keep a missing dosage as `{ "display": null }` and report it as unknown; do not invent a value.
+- `eventDate`: ISO date or `null`. Do not substitute upload/document date when the event date is absent or unclear.
+- `pageNumber`: positive integer or `null`.
+- `evidenceExcerpt`: exact source passage, or empty only for an explicit missing-information result. The backend validates non-empty excerpts against the identified source page after whitespace normalization.
+- `extractionStatus`: `supported`, `ambiguous`, or `unsupported`. Supported means source text supports the statement, not that a clinician has verified it.
+- `uncertainty`: array of `{ "code": "missing" | "ambiguous" | "unsupported", "explanation": "..." }`. Missing information remains unknown; “no allergy information documented” is not “no allergies.”
+- The engine must not return database IDs, reviewer identity, timestamps, or `verificationStatus`. The backend assigns those. New facts start with `verification_status = 'unverified'`.
+
+## Conflict result
+
+```json
+{
+  "conflicts": [
+    {
+      "normalizedKey": "study_med_a",
+      "conflictType": "same_time_disagreement",
+      "factRefs": [
+        { "documentId": "hospital-b-document-uuid", "normalizedKey": "study_med_a", "eventDate": "2026-10-18" },
+        { "documentId": "clinic-c-document-uuid", "normalizedKey": "study_med_a", "eventDate": "2026-10-18" }
+      ],
+      "explanation": "Two source records describe different statuses for the same medication on the same date.",
+      "status": "needs_review"
+    }
+  ]
+}
+```
+
+Supported `conflictType` values for the current database schema: `same_time_disagreement`, `chronology_candidate`, `duplicate_candidate`, and `ambiguous`. Conflict references must resolve to facts for the same patient. The engine reports a potential discrepancy; it never chooses which statement is clinically correct. Different dates may be a chronological change and must not automatically become a same-date conflict.
+
+## Backend operation: process document
+
+The authenticated frontend requests processing for an already uploaded document:
+
+```json
+{ "documentId": "server-assigned-document-uuid" }
+```
+
+The backend verifies patient access, retrieves the private source, calls the engine, validates the schema and evidence, assigns/preserves IDs, stores facts and conflicts, then returns:
+
+```json
+{
+  "documentId": "server-assigned-document-uuid",
+  "processingStatus": "processed",
+  "facts": [],
+  "conflicts": []
+}
+```
+
+For failures, return `{ "error": { "code": "invalid_request | unauthorized | unsupported_file | processing_failed", "message": "Safe user-facing explanation" } }`. Do not return secrets or raw document content in errors/logs.
+
+## Review operation
+
+Request:
+
+```json
+{
+  "factId": "fact-uuid",
+  "conflictId": null,
+  "action": "confirm | correct | flag_for_review | mark_not_a_conflict",
+  "decisionNote": "Optional reviewer note",
+  "correction": null
+}
+```
+
+The backend derives `reviewer_id` from the authenticated session and generates the timestamp. A correction is a new reviewed assertion; preserve the original extracted value and evidence. Save the review and audit event atomically. Audit history is append-only for ordinary users.
+
+## Database mapping
+
+The current migration uses snake_case columns. Map engine JSON fields as follows:
+
+| Engine field | Database column |
+| --- | --- |
+| `factType` | `medical_facts.fact_type` |
+| `normalizedKey` | `medical_facts.normalized_key` |
+| `value` | `medical_facts.value` (JSONB) |
+| `eventDate` | `medical_facts.event_date` |
+| `pageNumber` | `medical_facts.page_number` |
+| `evidenceExcerpt` | `medical_facts.evidence_excerpt` |
+| backend verification state | `medical_facts.verification_status` |
+| `uncertainty` | `medical_facts.uncertainty` (JSONB) |
+
+The backend stores conflicts in `conflicts` and links facts using `conflict_facts`. Use the patient UUID internally; `patientRef` is a demo-facing reference, not an authorization credential.
+
+## Security and limitations
+
+- Keep `XAI_API_KEY` and service-role credentials in Supabase server-side secrets only.
+- Enforce authorization in the backend and RLS; hidden UI controls are not access control.
+- Keep document storage private and use synthetic data only.
+- Treat model output as untrusted input. Validate shape, lengths, dates, enums, source references, and evidence before persistence.
+- This contract supports a hackathon prototype, not clinical verification or production healthcare claims.
