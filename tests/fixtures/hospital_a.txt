@@ -1,0 +1,10 @@
+FICTIONAL DEMO RECORD — NOT A REAL PATIENT OR CLINICAL DOCUMENT
+Patient reference: SM001
+Source: Hospital A
+Document date: 12 October 2026
+
+Medication history:
+- StudyMed A — active as of 12 October 2026.
+- Dose and route: not stated in this document.
+
+This fixture intentionally uses a fictional medication name. Do not interpret it as treatment guidance.

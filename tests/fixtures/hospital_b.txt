@@ -1,0 +1,10 @@
+FICTIONAL DEMO RECORD — NOT A REAL PATIENT OR CLINICAL DOCUMENT
+Patient reference: SM001
+Source: Hospital B
+Document date: 18 October 2026
+
+Medication history:
+- StudyMed A — discontinued, recorded 18 October 2026.
+- Reason for discontinuation: not stated in this document.
+
+This fixture intentionally uses a fictional medication name. Do not interpret it as treatment guidance.
